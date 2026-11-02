@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""flop_simulator — simulate flop boards in Texas Hold'em and compare two hands.
+
+For each simulated flop, the exact equity of each hand is computed by
+enumerating every possible turn + river runout. The tool reports the average
+post-flop equity, compares it to the preflop equity, and draws an ASCII
+histogram of how equity is distributed across the simulated flops.
+
+Example:
+    ./flop_sim --hand1 "6s7s" --hand2 "AcQh" --simulations 100
+"""
+
+import argparse
+import itertools
+import random
+import sys
+
+# --------------------------------------------------------------------------- #
+# Card parsing / formatting
+# --------------------------------------------------------------------------- #
+
+RANK_CHARS = {
+    "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+    "t": 10, "j": 11, "q": 12, "k": 13, "a": 14,
+}
+SUIT_CHARS = {"c": 0, "d": 1, "h": 2, "s": 3}
+
+RANK_TO_CHAR = {v: k.upper() for k, v in RANK_CHARS.items()}
+SUIT_TO_CHAR = {0: "c", 1: "d", 2: "h", 3: "s"}
+
+
+def parse_hand(text):
+    """Parse a hand string like '6s7s' into a list of (rank, suit) cards.
+
+    Case-insensitive. Each card is two characters (rank + suit). A Hold'em
+    hand is two cards (four characters).
+    """
+    s = text.strip().lower()
+    if len(s) % 2 != 0:
+        raise ValueError(f"'{text}' has an odd number of characters.")
+
+    cards = []
+    for i in range(0, len(s), 2):
+        rank_ch, suit_ch = s[i], s[i + 1]
+        if rank_ch not in RANK_CHARS:
+            raise ValueError(f"'{rank_ch}' is not a valid rank in '{text}'.")
+        if suit_ch not in SUIT_CHARS:
+            raise ValueError(f"'{suit_ch}' is not a valid suit in '{text}'.")
+        cards.append((RANK_CHARS[rank_ch], SUIT_CHARS[suit_ch]))
+
+    if len(cards) != 2:
+        raise ValueError(
+            f"'{text}' describes {len(cards)} card(s); a Hold'em hand needs exactly 2."
+        )
+    return cards
+
+
+def card_str(card):
+    rank, suit = card
+    return f"{RANK_TO_CHAR[rank]}{SUIT_TO_CHAR[suit]}"
+
+
+def hand_str(cards):
+    return " ".join(card_str(c) for c in cards)
+
+
+FULL_DECK = [(r, s) for r in range(2, 15) for s in range(4)]
+
+
+# --------------------------------------------------------------------------- #
+# 7-card hand evaluation
+# --------------------------------------------------------------------------- #
+# Returns a tuple whose first element is the hand category (8 = straight flush
+# down to 0 = high card) followed by tiebreakers. Larger tuples compare as
+# stronger hands via normal tuple comparison.
+
+def evaluate_7(cards):
+    ranks = [0] * 15
+    suit_ranks = ([], [], [], [])
+    for r, s in cards:
+        ranks[r] += 1
+        suit_ranks[s].append(r)
+
+    # Flush (and straight flush) — at most one suit can have 5+ cards in 7.
+    flush_ranks = None
+    for s in range(4):
+        if len(suit_ranks[s]) >= 5:
+            flush_ranks = suit_ranks[s]
+            break
+
+    if flush_ranks is not None:
+        present = [False] * 15
+        for r in flush_ranks:
+            present[r] = True
+        if present[14]:
+            present[1] = True  # ace plays low for the wheel
+        for top in range(14, 4, -1):
+            if (present[top] and present[top - 1] and present[top - 2]
+                    and present[top - 3] and present[top - 4]):
+                return (8, top)
+
+    quads, trips, pairs = [], [], []
+    for r in range(14, 1, -1):
+        c = ranks[r]
+        if c == 4:
+            quads.append(r)
+        elif c == 3:
+            trips.append(r)
+        elif c == 2:
+            pairs.append(r)
+
+    if quads:
+        q = quads[0]
+        for r in range(14, 1, -1):
+            if r != q and ranks[r]:
+                return (7, q, r)
+
+    if trips and (len(trips) >= 2 or pairs):
+        t = trips[0]
+        p = trips[1] if len(trips) >= 2 else pairs[0]
+        return (6, t, p)
+
+    if flush_ranks is not None:
+        top5 = sorted(flush_ranks, reverse=True)[:5]
+        return (5, tuple(top5))
+
+    # Straight using all ranks.
+    present = [False] * 15
+    for r in range(2, 15):
+        if ranks[r]:
+            present[r] = True
+    if present[14]:
+        present[1] = True
+    for top in range(14, 4, -1):
+        if (present[top] and present[top - 1] and present[top - 2]
+                and present[top - 3] and present[top - 4]):
+            return (4, top)
+
+    if trips:
+        t = trips[0]
+        ks = []
+        for r in range(14, 1, -1):
+            if r != t and ranks[r]:
+                ks.append(r)
+                if len(ks) == 2:
+                    break
+        return (3, t, ks[0], ks[1])
+
+    if len(pairs) >= 2:
+        p1, p2 = pairs[0], pairs[1]
+        for r in range(14, 1, -1):
+            if r != p1 and r != p2 and ranks[r]:
+                return (2, p1, p2, r)
+
+    if len(pairs) == 1:
+        p = pairs[0]
+        ks = []
+        for r in range(14, 1, -1):
+            if r != p and ranks[r]:
+                ks.append(r)
+                if len(ks) == 3:
+                    break
+        return (1, p, ks[0], ks[1], ks[2])
+
+    ks = []
+    for r in range(14, 1, -1):
+        if ranks[r]:
+            ks.append(r)
+            if len(ks) == 5:
+                break
+    return (0, ks[0], ks[1], ks[2], ks[3], ks[4])
+
+
+# --------------------------------------------------------------------------- #
+# Equity calculation
+# --------------------------------------------------------------------------- #
+
+def flop_equity(hand1, hand2, flop, deck):
+    """Exact equity of hand1 on a given flop, enumerating all turn+river combos.
+
+    `deck` is the list of remaining cards (hole cards and flop already removed).
+    Returns hand1's equity as a float in [0, 1]; hand2's equity is 1 - that.
+    """
+    base1 = hand1 + flop
+    base2 = hand2 + flop
+    wins = ties = total = 0
+    ev = evaluate_7
+    for turn, river in itertools.combinations(deck, 2):
+        s1 = ev(base1 + [turn, river])
+        s2 = ev(base2 + [turn, river])
+        if s1 > s2:
+            wins += 1
+        elif s1 == s2:
+            ties += 1
+        total += 1
+    return (wins + ties * 0.5) / total
+
+
+def preflop_equity(hand1, hand2, deck, samples, rng):
+    """Monte Carlo estimate of hand1's preflop equity over random 5-card boards."""
+    wins = ties = 0
+    ev = evaluate_7
+    sample = rng.sample
+    for _ in range(samples):
+        board = sample(deck, 5)
+        s1 = ev(hand1 + board)
+        s2 = ev(hand2 + board)
+        if s1 > s2:
+            wins += 1
+        elif s1 == s2:
+            ties += 1
+    return (wins + ties * 0.5) / samples
+
+
+# --------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------- #
+
+def pct(x):
+    return f"{x * 100:5.2f}%"
+
+
+def histogram(equities, buckets, width=40):
+    """Return a list of text lines showing an ASCII bar chart of equity."""
+    counts = [0] * buckets
+    bucket_w = 1.0 / buckets
+    for e in equities:
+        idx = min(int(e / bucket_w), buckets - 1)
+        counts[idx] += 1
+
+    n = len(equities)
+    max_count = max(counts) or 1
+    lines = []
+    for i, c in enumerate(counts):
+        lo = i * bucket_w * 100
+        hi = (i + 1) * bucket_w * 100
+        bar = "█" * round(c / max_count * width)
+        frac = c / n * 100
+        lines.append(f"  {lo:5.1f}-{hi:5.1f}% | {bar:<{width}} {c:>5} ({frac:4.1f}%)")
+    return lines
+
+
+def print_report(hand1, hand2, pf1, equities1, buckets):
+    n = len(equities1)
+    avg1 = sum(equities1) / n
+    avg2 = 1.0 - avg1
+    pf2 = 1.0 - pf1
+
+    h1, h2 = hand_str(hand1), hand_str(hand2)
+    label_w = max(len(h1), len(h2))
+
+    bar = "=" * 64
+    print(bar)
+    print(f"FLOP EQUITY SIMULATION  ({n} flops, exact equity per flop)")
+    print(bar)
+    print()
+    print(f"{'Hand':<{label_w}}   Preflop    Avg Flop   Realization (Δ)")
+    print(f"{'-' * label_w}   -------    --------   ---------------")
+    print(f"{h1:<{label_w}}   {pct(pf1)}    {pct(avg1)}    {(avg1 - pf1) * 100:+6.2f}%")
+    print(f"{h2:<{label_w}}   {pct(pf2)}    {pct(avg2)}    {(avg2 - pf2) * 100:+6.2f}%")
+    print()
+    print(f"Equity realization (Δ) = average post-flop equity − preflop equity.")
+    print(f"With both hands always going to showdown, equity is conserved, so Δ")
+    print(f"hovers near zero; the spread below is where the real story lives.")
+    print()
+    print(f"Distribution of {h1} equity across flops:")
+    print()
+
+    fav = sum(1 for e in equities1 if e > 0.5) / n * 100
+    crush = sum(1 for e in equities1 if e >= 0.8) / n * 100
+    dust = sum(1 for e in equities1 if e <= 0.2) / n * 100
+    print(f"  Flops where {h1} is ahead (>50%): {fav:.1f}%")
+    print(f"  Flops where {h1} is crushing (>=80%): {crush:.1f}%")
+    print(f"  Flops where {h1} is in the dust (<=20%): {dust:.1f}%")
+    print()
+    print(f"Equity histogram for {h1}:")
+    for line in histogram(equities1, buckets):
+        print(line)
+    print()
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="flop_simulator",
+        description="Simulate flop boards and compare two Texas Hold'em hands.",
+    )
+    parser.add_argument("--hand1", required=True, help="First hand, e.g. '6s7s'")
+    parser.add_argument("--hand2", required=True, help="Second hand, e.g. 'AcQh'")
+    parser.add_argument("-n", "--simulations", type=int, default=1000,
+                        help="Number of flops to simulate (default: 1000)")
+    parser.add_argument("--preflop-samples", type=int, default=25000,
+                        help="Monte Carlo samples for preflop equity (default: 25000)")
+    parser.add_argument("--buckets", type=int, default=20,
+                        help="Number of histogram buckets (default: 20)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducible runs")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress the progress indicator")
+    args = parser.parse_args(argv)
+
+    try:
+        hand1 = parse_hand(args.hand1)
+        hand2 = parse_hand(args.hand2)
+    except ValueError as e:
+        parser.error(str(e))
+
+    all_cards = hand1 + hand2
+    if len(set(all_cards)) != len(all_cards):
+        parser.error("The two hands share one or more identical cards.")
+    if args.simulations < 1:
+        parser.error("--simulations must be at least 1.")
+    if args.buckets < 1:
+        parser.error("--buckets must be at least 1.")
+
+    rng = random.Random(args.seed)
+    used = set(all_cards)
+    deck = [c for c in FULL_DECK if c not in used]  # 48 cards
+
+    if not args.quiet:
+        print(f"Computing preflop equity ({args.preflop_samples} samples)...",
+              file=sys.stderr)
+    pf1 = preflop_equity(hand1, hand2, deck, args.preflop_samples, rng)
+
+    equities1 = []
+    n = args.simulations
+    for i in range(n):
+        flop = rng.sample(deck, 3)
+        flop_set = set(flop)
+        remaining = [c for c in deck if c not in flop_set]  # 45 cards
+        equities1.append(flop_equity(hand1, hand2, flop, remaining))
+        if not args.quiet and (i + 1) % 50 == 0:
+            print(f"\r  simulating flops: {i + 1}/{n}", end="", file=sys.stderr)
+    if not args.quiet:
+        print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+
+    print_report(hand1, hand2, pf1, equities1, args.buckets)
+
+
+if __name__ == "__main__":
+    main()
