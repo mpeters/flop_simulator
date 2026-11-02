@@ -13,6 +13,7 @@ Example:
 import argparse
 import itertools
 import random
+import re
 import sys
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +63,16 @@ def card_str(card):
 
 def hand_str(cards):
     return " ".join(card_str(c) for c in cards)
+
+
+def flop_pattern_str(flop):
+    """Canonical string for pattern matching: cards in ascending rank order,
+    no spaces, e.g. [(5,c),(4,h),(14,s)] -> '4H5CAS'.
+
+    Ranks are uppercase (2-9, T, J, Q, K, A) and suits lowercase (c, d, h, s).
+    Patterns are matched case-insensitively, so '.s.*.s' or '4..*5' work.
+    """
+    return "".join(card_str(c) for c in sorted(flop))
 
 
 FULL_DECK = [(r, s) for r in range(2, 15) for s in range(4)]
@@ -279,6 +290,26 @@ def print_report(hand1, hand2, pf1, equities1, buckets):
     print()
 
 
+def print_pattern_report(patterns, or_patterns, match_count, n):
+    if not patterns and not or_patterns:
+        return
+    print("=" * 64)
+    print("FLOP PATTERN MATCHES")
+    print("=" * 64)
+    print()
+    print("A flop matches when ALL of the following conditions hold:")
+    for raw, _ in patterns:
+        print(f"    matches  {raw}")
+    if or_patterns:
+        print("    matches ANY of:")
+        for raw, _ in or_patterns:
+            print(f"        {raw}")
+    print()
+    frac = match_count / n * 100
+    print(f"  Matched: {match_count}/{n}  ({frac:.1f}%)")
+    print()
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -288,8 +319,10 @@ def main(argv=None):
         prog="flop_simulator",
         description="Simulate flop boards and compare two Texas Hold'em hands.",
     )
-    parser.add_argument("--hand1", required=True, help="First hand, e.g. '6s7s'")
-    parser.add_argument("--hand2", required=True, help="Second hand, e.g. 'AcQh'")
+    parser.add_argument("--hand1", help="First hand, e.g. '6s7s' "
+                        "(required unless only matching --pattern)")
+    parser.add_argument("--hand2", help="Second hand, e.g. 'AcQh' "
+                        "(required unless only matching --pattern)")
     parser.add_argument("-n", "--sims", type=int, default=1000,
                         help="Number of flops to simulate (default: 1000)")
     parser.add_argument("--preflop-samples", type=int, default=25000,
@@ -298,46 +331,99 @@ def main(argv=None):
                         help="Number of histogram buckets (default: 20)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducible runs")
+    pattern_help = (
+        "Regular expression matched against each flop. May be given multiple "
+        "times to match against several patterns. The flop is rendered with no "
+        "spaces and cards in ascending rank order (e.g. '4H5CAS'), and matching "
+        "is case-insensitive. E.g. '.s.*.s' finds flops with at least two "
+        "spades; '4..*5' finds flops containing both a 4 and a 5."
+    )
+    parser.add_argument("--pattern", action="append", metavar="PATTERN",
+                        dest="patterns", help=pattern_help)
+    parser.add_argument("--pattern-or", action="append", metavar="PATTERN",
+                        dest="or_patterns",
+                        help="Like --pattern, but all --pattern-or patterns are "
+                             "combined with OR logic (a flop satisfies the group "
+                             "if it matches any of them). The OR group is then "
+                             "combined with the --pattern group using AND.")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress the progress indicator")
     args = parser.parse_args(argv)
 
-    try:
-        hand1 = parse_hand(args.hand1)
-        hand2 = parse_hand(args.hand2)
-    except ValueError as e:
-        parser.error(str(e))
+    def compile_patterns(raw_list, flag):
+        compiled = []
+        for pat in (raw_list or []):
+            try:
+                compiled.append((pat, re.compile(pat, re.IGNORECASE)))
+            except re.error as e:
+                parser.error(f"{flag} '{pat}' is not a valid regular expression: {e}")
+        return compiled
 
-    all_cards = hand1 + hand2
-    if len(set(all_cards)) != len(all_cards):
-        parser.error("The two hands share one or more identical cards.")
+    patterns = compile_patterns(args.patterns, "--pattern")          # AND group
+    or_patterns = compile_patterns(args.or_patterns, "--pattern-or")  # OR group
+    has_patterns = bool(patterns or or_patterns)
+
+    # Equity comparison needs both hands. When only patterns are given we
+    # run in pattern-only mode over the full 52-card deck and skip equity.
+    compare_hands = args.hand1 is not None or args.hand2 is not None
+    if not compare_hands and not has_patterns:
+        parser.error("Specify both --hand1 and --hand2, or at least one "
+                     "--pattern/--pattern-or.")
+    if compare_hands and (args.hand1 is None or args.hand2 is None):
+        parser.error("Both --hand1 and --hand2 are required for an equity comparison.")
+
     if args.sims < 1:
         parser.error("--sims must be at least 1.")
     if args.buckets < 1:
         parser.error("--buckets must be at least 1.")
 
-    rng = random.Random(args.seed)
-    used = set(all_cards)
-    deck = [c for c in FULL_DECK if c not in used]  # 48 cards
+    hand1 = hand2 = None
+    used = set()
+    if compare_hands:
+        try:
+            hand1 = parse_hand(args.hand1)
+            hand2 = parse_hand(args.hand2)
+        except ValueError as e:
+            parser.error(str(e))
+        all_cards = hand1 + hand2
+        if len(set(all_cards)) != len(all_cards):
+            parser.error("The two hands share one or more identical cards.")
+        used = set(all_cards)
 
-    if not args.quiet:
-        print(f"Computing preflop equity ({args.preflop_samples} samples)...",
-              file=sys.stderr)
-    pf1 = preflop_equity(hand1, hand2, deck, args.preflop_samples, rng)
+    match_count = 0  # flops matching (all --pattern) AND (any --pattern-or)
+    rng = random.Random(args.seed)
+    deck = [c for c in FULL_DECK if c not in used]  # 48 cards (or 52 in pattern-only mode)
+
+    pf1 = None
+    if compare_hands:
+        if not args.quiet:
+            print(f"Computing preflop equity ({args.preflop_samples} samples)...",
+                  file=sys.stderr)
+        pf1 = preflop_equity(hand1, hand2, deck, args.preflop_samples, rng)
 
     equities1 = []
     n = args.sims
     for i in range(n):
         flop = rng.sample(deck, 3)
-        flop_set = set(flop)
-        remaining = [c for c in deck if c not in flop_set]  # 45 cards
-        equities1.append(flop_equity(hand1, hand2, flop, remaining))
+        if compare_hands:
+            flop_set = set(flop)
+            remaining = [c for c in deck if c not in flop_set]  # 45 cards
+            equities1.append(flop_equity(hand1, hand2, flop, remaining))
+        if has_patterns:
+            fstr = flop_pattern_str(flop)
+            and_ok = all(rx.search(fstr) for _, rx in patterns)
+            or_ok = (not or_patterns
+                     or any(rx.search(fstr) for _, rx in or_patterns))
+            if and_ok and or_ok:
+                match_count += 1
         if not args.quiet and (i + 1) % 50 == 0:
             print(f"\r  simulating flops: {i + 1}/{n}", end="", file=sys.stderr)
     if not args.quiet:
         print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
 
-    print_report(hand1, hand2, pf1, equities1, args.buckets)
+    if compare_hands:
+        print_report(hand1, hand2, pf1, equities1, args.buckets)
+    print_pattern_report(patterns, or_patterns, match_count, n)
 
 
 if __name__ == "__main__":
