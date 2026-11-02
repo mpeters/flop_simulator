@@ -30,11 +30,11 @@ RANK_TO_CHAR = {v: k.upper() for k, v in RANK_CHARS.items()}
 SUIT_TO_CHAR = {0: "c", 1: "d", 2: "h", 3: "s"}
 
 
-def parse_hand(text):
-    """Parse a hand string like '6s7s' into a list of (rank, suit) cards.
+def parse_cards(text):
+    """Parse a string like '6s7sAh' into a list of (rank, suit) cards.
 
-    Case-insensitive. Each card is two characters (rank + suit). A Hold'em
-    hand is two cards (four characters).
+    Case-insensitive. Each card is two characters (rank + suit). Any number of
+    cards is allowed.
     """
     s = text.strip().lower()
     if len(s) % 2 != 0:
@@ -48,7 +48,12 @@ def parse_hand(text):
         if suit_ch not in SUIT_CHARS:
             raise ValueError(f"'{suit_ch}' is not a valid suit in '{text}'.")
         cards.append((RANK_CHARS[rank_ch], SUIT_CHARS[suit_ch]))
+    return cards
 
+
+def parse_hand(text):
+    """Parse a Hold'em hand string like '6s7s' into exactly two cards."""
+    cards = parse_cards(text)
     if len(cards) != 2:
         raise ValueError(
             f"'{text}' describes {len(cards)} card(s); a Hold'em hand needs exactly 2."
@@ -331,6 +336,10 @@ def main(argv=None):
                         help="Number of histogram buckets (default: 20)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducible runs")
+    parser.add_argument("--dead", default=None,
+                        help="Dead cards removed from the deck before simulating, "
+                             "e.g. '2c2d9h'. Any number of cards; same format as "
+                             "--hand1/--hand2.")
     pattern_help = (
         "Regular expression matched against each flop. May be given multiple "
         "times to match against several patterns. The flop is rendered with no "
@@ -390,9 +399,27 @@ def main(argv=None):
             parser.error("The two hands share one or more identical cards.")
         used = set(all_cards)
 
+    dead = []
+    if args.dead is not None:
+        try:
+            dead = parse_cards(args.dead)
+        except ValueError as e:
+            parser.error(str(e))
+        if len(set(dead)) != len(dead):
+            parser.error("--dead lists one or more cards more than once.")
+        clash = used & set(dead)
+        if clash:
+            names = ", ".join(sorted(card_str(c) for c in clash))
+            parser.error(f"--dead includes card(s) already in a hand: {names}.")
+        used |= set(dead)
+
     match_count = 0  # flops matching (all --pattern) AND (any --pattern-or)
     rng = random.Random(args.seed)
-    deck = [c for c in FULL_DECK if c not in used]  # 48 cards (or 52 in pattern-only mode)
+    deck = [c for c in FULL_DECK if c not in used]  # remaining live cards
+
+    if len(deck) < 3:
+        parser.error("Too few live cards remain to deal a flop after removing "
+                     "hands and --dead cards.")
 
     pf1 = None
     if compare_hands:

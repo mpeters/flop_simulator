@@ -20,6 +20,10 @@ For every simulated flop the tool computes **exact** equity by enumerating all
 Cards are two characters each, case-insensitive: rank (`2`-`9`, `T`, `J`, `Q`,
 `K`, `A`) + suit (`c`, `d`, `h`, `s`). A hand is two cards, e.g. `6s7s`, `AcQh`.
 
+Use `--dead` to remove known cards (e.g. folded or exposed) from the deck before
+simulating. It takes any number of cards in the same format as a hand, e.g.
+`--dead '2c2d9h'`; those cards can never appear in a simulated flop.
+
 ### Options
 
 | Flag | Default | Description |
@@ -29,6 +33,7 @@ Cards are two characters each, case-insensitive: rank (`2`-`9`, `T`, `J`, `Q`,
 | `--preflop-samples` | `25000` | Monte Carlo samples for preflop equity |
 | `--buckets` | `20` | Histogram buckets |
 | `--seed` | none | Seed for reproducible runs |
+| `--dead` | none | Dead cards removed from the deck before simulating, e.g. `2c2d9h` |
 | `--pattern` | none | Regular expression matched against each flop; repeatable, AND-combined (see below) |
 | `--pattern-or` | none | Like `--pattern`, but repeats are OR-combined, then AND-ed with `--pattern` |
 | `--quiet` | off | Suppress the progress indicator |
