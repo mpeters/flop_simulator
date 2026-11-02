@@ -14,7 +14,7 @@ For every simulated flop the tool computes **exact** equity by enumerating all
 ## Usage
 
 ```bash
-./flop_sim --hand1 "6s7s" --hand2 "AcQh" --simulations 100
+./flop_sim --hand1 "6s7s" --hand2 "AcQh" --sims 100
 ```
 
 Cards are two characters each, case-insensitive: rank (`2`-`9`, `T`, `J`, `Q`,
@@ -25,7 +25,7 @@ Cards are two characters each, case-insensitive: rank (`2`-`9`, `T`, `J`, `Q`,
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--hand1` / `--hand2` | (required) | The two hands to compare |
-| `-n`, `--simulations` | `1000` | Number of flops to simulate |
+| `-n`, `--sims` | `1000` | Number of flops to simulate |
 | `--preflop-samples` | `25000` | Monte Carlo samples for preflop equity |
 | `--buckets` | `20` | Histogram buckets |
 | `--seed` | none | Seed for reproducible runs |

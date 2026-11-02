@@ -7,7 +7,7 @@ post-flop equity, compares it to the preflop equity, and draws an ASCII
 histogram of how equity is distributed across the simulated flops.
 
 Example:
-    ./flop_sim --hand1 "6s7s" --hand2 "AcQh" --simulations 100
+    ./flop_sim --hand1 "6s7s" --hand2 "AcQh" --sims 100
 """
 
 import argparse
@@ -290,7 +290,7 @@ def main(argv=None):
     )
     parser.add_argument("--hand1", required=True, help="First hand, e.g. '6s7s'")
     parser.add_argument("--hand2", required=True, help="Second hand, e.g. 'AcQh'")
-    parser.add_argument("-n", "--simulations", type=int, default=1000,
+    parser.add_argument("-n", "--sims", type=int, default=1000,
                         help="Number of flops to simulate (default: 1000)")
     parser.add_argument("--preflop-samples", type=int, default=25000,
                         help="Monte Carlo samples for preflop equity (default: 25000)")
@@ -311,8 +311,8 @@ def main(argv=None):
     all_cards = hand1 + hand2
     if len(set(all_cards)) != len(all_cards):
         parser.error("The two hands share one or more identical cards.")
-    if args.simulations < 1:
-        parser.error("--simulations must be at least 1.")
+    if args.sims < 1:
+        parser.error("--sims must be at least 1.")
     if args.buckets < 1:
         parser.error("--buckets must be at least 1.")
 
@@ -326,7 +326,7 @@ def main(argv=None):
     pf1 = preflop_equity(hand1, hand2, deck, args.preflop_samples, rng)
 
     equities1 = []
-    n = args.simulations
+    n = args.sims
     for i in range(n):
         flop = rng.sample(deck, 3)
         flop_set = set(flop)
